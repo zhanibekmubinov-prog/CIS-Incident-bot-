@@ -158,24 +158,23 @@ def message_link(chat, message_id: int) -> str:
 
 
 # ============================================================ хендлеры
-async def on_mention(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def record(update: Update, context: ContextTypes.DEFAULT_TYPE, body: str) -> None:
+    """Единая запись строки. body — уже очищенный текст."""
     msg = update.effective_message
-    if not msg:
-        return
-
-    bot_username = context.bot.username
-    if not is_mentioned(msg, bot_username):
-        return  # реплаи, команды и упоминания других людей игнорируем
-
-    raw, entities = _text_and_entities(msg)
     user = msg.from_user
+    if not body:
+        await msg.reply_text(
+            "Текст пустой — напишите описание после команды.\n"
+            "Например: /inc Не закреплён шланг ЛВД на кусте 42"
+        )
+        return
     row = [
         msg.date.astimezone(ATYRAU).strftime("%Y-%m-%d %H:%M:%S"),
         msg.chat.title or (user.full_name if user else ""),
         str(msg.chat.id),
         user.full_name if user else "",
         f"@{user.username}" if user and user.username else "",
-        strip_mention(raw, entities, bot_username),
+        body,
         message_link(msg.chat, msg.message_id),
     ]
 
@@ -187,6 +186,23 @@ async def on_mention(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as exc:
         log.exception("Запись не удалась")
         await msg.reply_text(f"⚠️ Не смог записать в таблицу.\n{exc}")
+
+
+async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/inc описание — основной способ, работает при любом privacy mode."""
+    msg = update.effective_message
+    text = msg.text or msg.caption or ""
+    body = " ".join(text.split(maxsplit=1)[1:]).strip()
+    await record(update, context, body)
+
+
+async def on_mention(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """@бот описание — альтернативный способ."""
+    msg = update.effective_message
+    if not msg or not is_mentioned(msg, context.bot.username):
+        return
+    raw, entities = _text_and_entities(msg)
+    await record(update, context, strip_mention(raw, entities, context.bot.username))
 
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -205,8 +221,11 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(f"❌ Проблема с доступом:\n{exc}")
 
 
+DEBUG_ALL = os.getenv("DEBUG_ALL") == "1"
+
+
 async def debug_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """ДИАГНОСТИКА: пишет в лог всё, что бот получает от Telegram."""
+    """Диагностика: пишет в лог всё входящее. Включается DEBUG_ALL=1."""
     msg = update.effective_message
     if not msg:
         log.info("DEBUG: апдейт без сообщения: %s", update.to_dict())
@@ -230,8 +249,11 @@ def main() -> None:
 
     app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
     app.bot_data["graph"] = graph
-    app.add_handler(MessageHandler(filters.ALL, debug_all), group=-1)
+    if DEBUG_ALL:
+        app.add_handler(MessageHandler(filters.ALL, debug_all), group=-1)
+        log.info("Диагностика DEBUG_ALL включена")
     app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("inc", on_command))
     app.add_handler(
         MessageHandler(
             filters.Entity(MessageEntity.MENTION)
